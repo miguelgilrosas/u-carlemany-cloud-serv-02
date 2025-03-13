@@ -43,7 +43,6 @@ async def auth_register(input: RegisterInput = Body()) -> dict[str, RegisterOutp
         mail=input.mail,
         age_of_birth=input.age_of_birth,
     )
-    # print('HASH: ' + str(hashed_password.hex()))
 
     users[input.username] = new_user
 
