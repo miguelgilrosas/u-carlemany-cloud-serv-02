@@ -1,14 +1,15 @@
-from fastapi import APIRouter, UploadFile, File, Header, HTTPException
+from fastapi import APIRouter, Body, UploadFile, File, Header, HTTPException
+from fastapi.responses import FileResponse
 from pypdf import PdfMerger
 import uuid
 from pydantic import BaseModel
 import aiohttp
 import json
+import os
 
 router = APIRouter()
 
 authentication_url = '0.0.0.0'
-
 files = {}
 
 
@@ -16,23 +17,14 @@ class FileModel(BaseModel):
     filename: str
     path: str
     author: str
+    desc: str
+    number_of_pages: int
 
-@router.post("/merge")
-async def merge_files() -> dict[str, str]:
-    file1 = "files/act01.pdf"
-    file2 = "files/act02.pdf"
-    merged = "files/act01act02.pdf"
-    pdfs = [file1, file2]
-    merger = PdfMerger()
 
-    for pdf in pdfs:
-        merger.append(pdf)
-
-    name = merged
-    merger.write(name)
-    merger.close()
-
-    return {"status": "ok"}
+class FileInput(BaseModel):
+    filename: str
+    desc: str
+    number_of_pages: int
 
 
 @router.get("/")
@@ -51,43 +43,138 @@ async def get_files(auth: str = Header()) -> list[dict[str, FileModel]]:
 
 @router.post("/")
 async def post_file(
-    auth: str = Header(),
-    input_file: UploadFile = File()
-) -> dict[str, FileModel]:
+    data_input: FileInput = Body(),
+    auth: str = Header()
+) -> dict[str, str]:
     user = await auth_check(auth)
 
-    prefix = 'files/'
     file_id = str(uuid.uuid4())
     while file_id in files:
         file_id = str(uuid.uuid4())
-    path = prefix + file_id + '.pdf'
 
+    files[file_id] = FileModel(
+        filename=data_input.filename,
+        path='',
+        author=user['username'],
+        desc=data_input.desc,
+        number_of_pages=data_input.number_of_pages
+    )
+
+    return {'file_id': file_id}
+
+
+class MergeInput(BaseModel):
+    file_id1: str
+    file_id2: str
+
+
+@router.post("/merge")
+async def merge_files(
+    input_data: MergeInput = Body(),
+    auth: str = Header()
+) -> dict[str, str]:
+    user = await auth_check(auth)
+
+    if input_data.file_id1 not in files or input_data.file_id2 not in files:
+        raise HTTPException(status_code=404, detail='Not found')
+
+    file1 = files[input_data.file_id1]
+    file2 = files[input_data.file_id2]
+    if file1.author != user['username'] or file2.author != user['username']:
+        raise HTTPException(status_code=403, detail='Forbidden')
+
+    merged_id = str(uuid.uuid4())
+    while merged_id in files:
+        merged_id = str(uuid.uuid4())
+    merged = "files/" + merged_id + ".pdf"
+    pdfs = [file1.path, file2.path]
+    merger = PdfMerger()
+
+    for pdf in pdfs:
+        merger.append(pdf)
+
+    name = merged
+    merger.write(name)
+    merger.close()
+
+    files[merged_id] = FileModel(
+        filename='Merged.pdf',
+        path=merged,
+        author=user['username'],
+        desc='Merged file created from "' + file1.path + '" and "' + file2.path + '"',
+        number_of_pages=file1.number_of_pages + file2.number_of_pages
+    )
+
+    return {"file_id": merged_id}
+
+
+@router.post("/{file_id}")
+async def post_file_by_id(
+    file_id: str,
+    auth: str = Header(),
+    input_file: UploadFile = File()
+) -> dict[str, str]:
+    user = await auth_check(auth)
+
+    if file_id not in files:
+        raise HTTPException(status_code=404, detail='Not found')
+
+    file = files[file_id]
+
+    if user['username'] != file.author:
+        raise HTTPException(status_code=403, detail='Forbidden')
+
+    prefix = 'files/'
+    path = prefix + file_id + '.pdf'
     with open(path, "wb") as buffer:
         while chunk := await input_file.read(8192):
             buffer.write(chunk)
+    file.path = path
 
-    new_file = FileModel(
-        filename=input_file.filename,
-        path=path,
-        author=user['username'],
+    return {"status": "ok"}
+
+
+@router.get("/{file_id}")
+async def get_file_by_id(
+    file_id: str,
+    auth: str = Header()
+) -> FileResponse:
+    user = await auth_check(auth)
+
+    if file_id not in files:
+        raise HTTPException(status_code=404, detail='Not found')
+
+    file = files[file_id]
+
+    if user['username'] != file.author:
+        raise HTTPException(status_code=403, detail='Forbidden')
+
+    return FileResponse(
+        path=file.path,
+        filename=file.filename,
+        media_type='application/pdf'
     )
-    files[file_id] = new_file
-
-    return {file_id: new_file}
 
 
-@router.get("/{id}")
-async def get_file_by_id() -> dict[str, str]:
-    return {"status": "ok"}
+@router.delete("/{file_id}")
+async def delete_file_by_id(
+    file_id: str,
+    auth: str = Header()
+) -> dict[str, str]:
+    user = await auth_check(auth)
 
+    if file_id not in files:
+        raise HTTPException(status_code=404, detail='Not found')
 
-@router.post("/{id}")
-async def post_file_by_id() -> dict[str, str]:
-    return {"status": "ok"}
+    file = files[file_id]
 
+    if user['username'] != file.author:
+        raise HTTPException(status_code=403, detail='Forbidden')
 
-@router.delete("/{id}")
-async def delete_file_by_id() -> dict[str, str]:
+    if file.path != '':
+        os.remove(file.path)
+    del files[file_id]
+
     return {"status": "ok"}
 
 
